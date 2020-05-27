@@ -8,6 +8,7 @@ import org.scalatest.{MustMatchers, WordSpec}
 import org.slf4j.LoggerFactory
 import sbt.util.{Level, Logger}
 
+import scala.io.Source
 import scala.util.Try
 
 class SbtDepContainersPluginSpec extends WordSpec with MustMatchers {
@@ -84,6 +85,22 @@ class SbtDepContainersPluginSpec extends WordSpec with MustMatchers {
       val containerID = ContainerID("test:hello-java", "https://github.com/jamesward/hello-java.git", "v0.0.1")
       dockerRm(containerID)
       createContainer(containerID)
+    }
+  }
+
+  "containersStartAll" must {
+    "start a containerID" in {
+      val containerID = ContainerID("test:hello-java", "https://github.com/jamesward/hello-java.git", "master")
+      val url = SbtDepContainersPlugin.containersStartAll(Seq(containerID), Seq.empty, logger)._1(containerID)
+      val is = Source.fromInputStream(url.openConnection().getInputStream)
+      is.mkString must equal ("hello, world")
+    }
+  }
+
+  "containersStopAll" must {
+    "stop a containerID" in {
+      val containerID = ContainerID("test:hello-java", "https://github.com/jamesward/hello-java.git", "master")
+      SbtDepContainersPlugin.containersStopAll(Seq(containerID), Seq.empty, logger)
     }
   }
 

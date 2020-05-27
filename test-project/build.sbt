@@ -14,3 +14,14 @@ containerDependencies := Seq(
   "HelloJava" ~ "https://github.com/jamesward/hello-java.git" ~ "master",
   "SampleJava" ~ "https://github.com/GoogleCloudPlatform/buildpack-samples.git" ~ "master" / "sample-java-mvn",
 )
+
+javacOptions ++= Seq("-source", "11", "-target", "11")
+
+scalacOptions += "-target:jvm-11"
+
+initialize := {
+  val _ = initialize.value
+  val javaVersion = sys.props("java.specification.version")
+  if (javaVersion != "11")
+    sys.error("Java 11 is required for this project. Found " + javaVersion + " instead")
+}
