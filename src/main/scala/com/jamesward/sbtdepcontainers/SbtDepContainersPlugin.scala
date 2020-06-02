@@ -1,5 +1,7 @@
 package com.jamesward.sbtdepcontainers
 
+import java.net.URL
+
 import com.github.dockerjava.api.async.ResultCallback
 import com.github.dockerjava.api.command.WaitContainerResultCallback
 import com.github.dockerjava.api.model.Ports.Binding
@@ -24,31 +26,45 @@ object SbtDepContainersPlugin extends AutoPlugin {
 
   override def trigger = allRequirements
 
-  case class ContainerIDBuilderID(name: String) {
-    def ~(gitUrl: String): ContainerIDBuilderGitUrl = ContainerIDBuilderGitUrl(name, gitUrl)
+  case class ContainerIDBuilder(gitUrl: URL) {
+    def %(branchOrTag: String): ContainerID = ContainerID(gitUrl, branchOrTag)
   }
 
-  case class ContainerIDBuilderGitUrl(name: String, gitUrl: String) {
-    def ~(branchOrTag: String): ContainerID = ContainerID(name, gitUrl, branchOrTag)
-  }
-
-  case class ContainerID(name: String, gitUrl: String, branchOrTag: String, maybeSubdir: Option[String] = None) {
+  case class ContainerID(gitUrl: URL, branchOrTag: String, maybeSubdir: Option[String] = None) {
     def /(subdir: String): ContainerID = copy(maybeSubdir = Some(subdir))
 
-    lazy val validName = name.toLowerCase().replaceAll("[^a-z]", "-").replaceAll("--", "-")
-    lazy val dockerTag = s"$validName:$branchOrTag"
+    lazy val pathParts = gitUrl.getPath.stripSuffix(".git").split("/") ++ maybeSubdir.map(_.split("/")).getOrElse(Array.empty)
+    lazy val name = pathParts.last.toLowerCase().replaceAll("[^a-z]", "-").replaceAll("--", "-")
+
+    lazy val packageName = {
+      val reversedDomain = gitUrl.getHost.split("\\.").reverse.map(_.replaceAll("[^a-z]", "")).mkString(".").toLowerCase
+
+      if (pathParts.length > 1) {
+        reversedDomain + pathParts.dropRight(1).map(_.toLowerCase).map(_.replaceAll("[^a-z]", "")).mkString(".")
+      }
+      else {
+        reversedDomain
+      }
+    }
+
+
+    lazy val className = "Dep" + name.split("-").map(_.capitalize).mkString
+
+    lazy val envVar = name.toUpperCase.replaceAll("-", "_") + "_URL"
+    lazy val dockerTag = s"$name:$branchOrTag"
   }
 
   object autoImport {
+    val Containers = config("Containers") extend Compile
+
     val containerBuilder = settingKey[String]("Buildpacks builder image")
     val containerDependencies = settingKey[Seq[ContainerID]]("Container dependencies")
 
     val containersCreate = taskKey[Unit]("Create the dependency containers")
-    val containersStart = taskKey[Unit]("Start the dependency containers")
+    val containersStart = taskKey[Map[String, String]]("Start the dependency containers")
     val containersStop = taskKey[Unit]("Stop the dependency containers")
 
-    // todo: validate name
-    implicit def stringToContainerIDBuilder(name: String): ContainerIDBuilderID = ContainerIDBuilderID(name)
+    implicit def urlToContainerIDBuilder(gitUrl: URL): ContainerIDBuilder = ContainerIDBuilder(gitUrl)
   }
 
   import autoImport._
@@ -64,21 +80,20 @@ object SbtDepContainersPlugin extends AutoPlugin {
   }
 
   def createContainer(target: File, containerBuilder: String, logger: sbt.util.Logger)(containerID: ContainerID): Unit = {
-    val gitUri = new URI(containerID.gitUrl)
-    val gitDir = target / "depcontainers" / gitUri.getHost / gitUri.getPath / containerID.branchOrTag
+    val gitDir = target / "depcontainers" / containerID.gitUrl.getHost / containerID.gitUrl.getPath / containerID.branchOrTag
 
-    val ref = Git.lsRemoteRepository().setRemote(containerID.gitUrl).call().asScala.find(_.getName.endsWith("/" + containerID.branchOrTag)).get
+    val ref = Git.lsRemoteRepository().setRemote(containerID.gitUrl.toString).call().asScala.find(_.getName.endsWith("/" + containerID.branchOrTag)).get
 
     if (gitDir.exists()) {
-      logger.info(s"Updating $gitUri ${ref.getName}")
+      logger.info(s"Updating ${containerID.gitUrl} ${ref.getName}")
 
       Git.open(gitDir).pull().call()
     }
     else {
-      logger.info(s"Cloning $gitUri ${ref.getName}")
+      logger.info(s"Cloning ${containerID.gitUrl} ${ref.getName}")
 
       Git.cloneRepository()
-        .setURI(gitUri.toString)
+        .setURI(containerID.gitUrl.toString)
         .setBranchesToClone(Seq(ref.getName).asJava)
         .setBranch(ref.getName)
         .setDirectory(gitDir)
@@ -170,21 +185,23 @@ object SbtDepContainersPlugin extends AutoPlugin {
 
   lazy val generateDependencyContainersTask = Def.task {
     containerDependencies.value.map { containerID =>
-      val file = sourceManaged.value / "main" / s"${containerID.name}.scala"
+      val file = sourceManaged.value / "main" / "depcontainers" / s"${containerID.name}.scala"
 
       val contents =
-        s"""import java.net.URL
+        s"""package ${containerID.packageName}
+           |
+           |import java.net.URL
            |
            |import com.dimafeng.testcontainers.GenericContainer
            |import org.testcontainers.containers.wait.strategy.Wait
            |
            |
-           |class ${containerID.name}() extends GenericContainer("${containerID.dockerTag}", Seq(8080), Map("PORT" -> "8080"), waitStrategy = Some(Wait.forListeningPort())) {
+           |class ${containerID.className}() extends GenericContainer("${containerID.dockerTag}", Seq(8080), Map("PORT" -> "8080"), waitStrategy = Some(Wait.forListeningPort())) {
            |  def rootUrl: URL = new URL(s"http://$$containerIpAddress:$${mappedPort(8080)}/")
            |}
            |
-           |object ${containerID.name} {
-           |  case class Def() extends GenericContainer.Def(new ${containerID.name})
+           |object ${containerID.className} {
+           |  case class Def() extends GenericContainer.Def(new ${containerID.className})
            |}
            |
            |""".stripMargin
@@ -195,7 +212,18 @@ object SbtDepContainersPlugin extends AutoPlugin {
     }
   }.dependsOn(Compile / managedClasspath)
 
-  lazy val containersStartTask = Def.task(containersStartAll(containerDependencies.value, libraryDependencies.value, streams.value.log)).dependsOn(containersCreate)
+  // todo: support better incremental usage
+  // todo: moduleIDs
+  lazy val containersStartTask = Def.task {
+    val (containerIDsURLs, moduleIDsData) = containersStartAll(containerDependencies.value, libraryDependencies.value, streams.value.log)
+
+    val newEnvVars = containerIDsURLs.map { case (containerID, url) =>
+      containerID.envVar -> url.toString
+    }
+
+    newEnvVars
+  }.dependsOn(containersCreate)
+
 
   override def projectSettings: Seq[Def.Setting[_]] = Seq(
     libraryDependencies += "com.dimafeng" %% "testcontainers-scala-core" % "0.37.0",
@@ -208,10 +236,26 @@ object SbtDepContainersPlugin extends AutoPlugin {
 
     containersStop := containersStopAll(containerDependencies.value, libraryDependencies.value, streams.value.log),
 
+    Containers / run / runner := {
+      val envVars = containersStart.value
+      val opts = forkOptions.value.withEnvVars(envVars)
+      val options = javaOptions.value
+      streams.value.log.debug(s"javaOptions: $options")
+      new ForkRun(opts)
+    },
+
+    // todo: stop containers?
+    Containers / run := {
+      Defaults.runTask(
+        Runtime / fullClasspath,
+        Compile / run / mainClass,
+        Containers / run / runner,
+      ).evaluated
+    },
+
     Test / test := (Test / test).dependsOn(containersCreate).value,
 
-    // todo: start containers and pass env vars
-    Compile / run := (Compile / run).dependsOn(containersCreate).evaluated,
+    Compile / run := (Compile / run).evaluated,
   )
 
 

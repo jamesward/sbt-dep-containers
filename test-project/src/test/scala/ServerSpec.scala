@@ -1,11 +1,12 @@
 import com.dimafeng.testcontainers.scalatest.TestContainerForAll
+import com.github.jamesward.DepHelloJava
 import org.scalatest._
 
 import scala.io.Source
 
 class ServerSpec extends WordSpec with MustMatchers with TestContainerForAll {
 
-  override val containerDef = HelloJava.Def()
+  override val containerDef = DepHelloJava.Def()
 
   "container" must {
     "respond to an http request" in withContainers { container =>

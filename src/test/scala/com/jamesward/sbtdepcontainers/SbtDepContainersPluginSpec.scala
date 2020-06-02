@@ -1,5 +1,6 @@
 package com.jamesward.sbtdepcontainers
 
+import java.net.URL
 import java.nio.file.Files
 
 import com.github.dockerjava.core.{DefaultDockerClientConfig, DockerClientBuilder}
@@ -44,12 +45,26 @@ class SbtDepContainersPluginSpec extends WordSpec with MustMatchers {
   }
 
   def createContainer(containerID: ContainerID): Unit = {
-    SbtDepContainersPlugin.createContainer(Files.createTempDirectory(containerID.validName).toFile, SbtDepContainersPlugin.defaultContainerBuilder, logger)(containerID)
+    SbtDepContainersPlugin.createContainer(Files.createTempDirectory(containerID.name).toFile, SbtDepContainersPlugin.defaultContainerBuilder, logger)(containerID)
+  }
+
+  "containerID" must {
+    "have correct package and class names" in {
+      ContainerID(new URL("https://github.com/jamesward/foo-bar.git"), "master") must have (
+        'packageName ("com.github.jamesward"),
+        'className ("DepFooBar"),
+      )
+
+      ContainerID(new URL("https://github.com/jamesward/something.git"), "master", Some("foo/bar")) must have (
+        'packageName ("com.github.jamesward.something.foo"),
+        'className ("DepBar"),
+      )
+    }
   }
 
   "createContainer" must {
     "work" in {
-      val containerID = ContainerID("test:hello-java", "https://github.com/jamesward/hello-java.git", "master")
+      val containerID = ContainerID(new URL("https://github.com/jamesward/hello-java.git"), "master")
       dockerRm(containerID)
       createContainer(containerID)
       dockerStartStop(containerID)
@@ -58,23 +73,15 @@ class SbtDepContainersPluginSpec extends WordSpec with MustMatchers {
 
   "createContainer" must {
     "fail with something not buildable by buildpacks" in {
-      val containerID = ContainerID("test-hello-netcat", "https://github.com/jamesward/hello-netcat.git", "master")
+      val containerID = ContainerID(new URL("https://github.com/jamesward/hello-netcat.git"), "master")
       dockerRm(containerID)
       an[Exception] must be thrownBy createContainer(containerID)
     }
   }
 
   "createContainer" must {
-    "not fail when the name is invalid" in {
-      val containerID = ContainerID("test:hello-java", "https://github.com/jamesward/hello-java.git", "master")
-      dockerRm(containerID)
-      createContainer(containerID)
-    }
-  }
-
-  "createContainer" must {
     "work with a subdir" in {
-      val containerID = ContainerID("test:hello-java", "https://github.com/GoogleCloudPlatform/buildpack-samples.git", "master", Some("sample-java-mvn"))
+      val containerID = ContainerID(new URL("https://github.com/GoogleCloudPlatform/buildpack-samples.git"), "master", Some("sample-java-mvn"))
       dockerRm(containerID)
       createContainer(containerID)
     }
@@ -82,7 +89,7 @@ class SbtDepContainersPluginSpec extends WordSpec with MustMatchers {
 
   "createContainer" must {
     "work with a git tag" in {
-      val containerID = ContainerID("test:hello-java", "https://github.com/jamesward/hello-java.git", "v0.0.1")
+      val containerID = ContainerID(new URL("https://github.com/jamesward/hello-java.git"), "v0.0.1")
       dockerRm(containerID)
       createContainer(containerID)
     }
@@ -90,7 +97,7 @@ class SbtDepContainersPluginSpec extends WordSpec with MustMatchers {
 
   "containersStartAll" must {
     "start a containerID" in {
-      val containerID = ContainerID("test:hello-java", "https://github.com/jamesward/hello-java.git", "master")
+      val containerID = ContainerID(new URL("https://github.com/jamesward/hello-java.git"), "master")
       val url = SbtDepContainersPlugin.containersStartAll(Seq(containerID), Seq.empty, logger)._1(containerID)
       val is = Source.fromInputStream(url.openConnection().getInputStream)
       is.mkString must equal ("hello, world")
@@ -99,7 +106,7 @@ class SbtDepContainersPluginSpec extends WordSpec with MustMatchers {
 
   "containersStopAll" must {
     "stop a containerID" in {
-      val containerID = ContainerID("test:hello-java", "https://github.com/jamesward/hello-java.git", "master")
+      val containerID = ContainerID(new URL("https://github.com/jamesward/hello-java.git"), "master")
       SbtDepContainersPlugin.containersStopAll(Seq(containerID), Seq.empty, logger)
     }
   }

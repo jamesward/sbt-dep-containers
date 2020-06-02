@@ -10,13 +10,13 @@ object Server {
     val port = sys.env.getOrElse("PORT", "8080").toInt
 
     val helloJavaUrl = new URL(sys.env("HELLO_JAVA_URL"))
-    val sampleJavaUrl = new URL(sys.env("SAMPLE_JAVA_URL"))
+    val sampleJavaUrl = new URL(sys.env("SAMPLE_JAVA_MVN_URL"))
 
     val server = HttpServer.create(new InetSocketAddress(port), 0)
 
     server.createContext("/").setHandler((exchange: HttpExchange) => {
-      val helloJavaResponse = Using(helloJavaUrl.openConnection().getInputStream)(Source.fromInputStream).map(_.mkString).get
-      val sampleJavaResponse = Using(sampleJavaUrl.openConnection().getInputStream)(Source.fromInputStream).map(_.mkString).get
+      val helloJavaResponse = Using(helloJavaUrl.openConnection().getInputStream)(Source.fromInputStream(_).mkString).get
+      val sampleJavaResponse = Using(sampleJavaUrl.openConnection().getInputStream)(Source.fromInputStream(_).mkString).get
 
       val response =s"""
           |helloJava: $helloJavaResponse

@@ -1,15 +1,17 @@
 import com.dimafeng.testcontainers.lifecycle.and
 import com.dimafeng.testcontainers.scalatest.TestContainersForAll
+import com.github.googlecloudplatform.buildpacksamples.DepSampleJavaMvn
+import com.github.jamesward._
 import org.scalatest._
 
 import scala.io.Source
 
 class MultipleContainersSpec extends WordSpec with MustMatchers with TestContainersForAll {
 
-  override type Containers = HelloJava and SampleJava
+  override type Containers = DepHelloJava and DepSampleJavaMvn
 
   override def startContainers(): Containers = {
-    HelloJava.Def().start() and SampleJava.Def().start()
+    DepHelloJava.Def().start() and DepSampleJavaMvn.Def().start()
   }
 
   "container" must {
