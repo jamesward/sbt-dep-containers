@@ -7,6 +7,7 @@ import com.github.dockerjava.core.{DefaultDockerClientConfig, DockerClientBuilde
 import com.jamesward.sbtdepcontainers.SbtDepContainersPlugin.ContainerID
 import org.scalatest.{MustMatchers, WordSpec}
 import org.slf4j.LoggerFactory
+import sbt.librarymanagement.ModuleID
 import sbt.util.{Level, Logger}
 
 import scala.io.Source
@@ -98,7 +99,7 @@ class SbtDepContainersPluginSpec extends WordSpec with MustMatchers {
   "containersStartAll" must {
     "start a containerID" in {
       val containerID = ContainerID(new URL("https://github.com/jamesward/hello-java.git"), "master")
-      val url = SbtDepContainersPlugin.containersStartAll(Seq(containerID), Seq.empty, logger)._1(containerID)
+      val url = SbtDepContainersPlugin.containerIDsStart(Seq(containerID), logger)(containerID)
       val is = Source.fromInputStream(url.openConnection().getInputStream)
       is.mkString must equal ("hello, world")
     }
@@ -110,5 +111,7 @@ class SbtDepContainersPluginSpec extends WordSpec with MustMatchers {
       SbtDepContainersPlugin.containersStopAll(Seq(containerID), Seq.empty, logger)
     }
   }
+
+  // todo: test starting a TestContainer but right now that happens in a sbt task
 
 }

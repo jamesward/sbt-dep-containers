@@ -19,6 +19,7 @@ libraryDependencies ++= Seq(
   "com.github.docker-java" % "docker-java" % "3.2.1",
 
   "org.scalatest" %% "scalatest" % "3.0.8" % "test",
+  "org.testcontainers" % "postgresql" % "1.13.0" % "test",
 )
 
 publishMavenStyle := false

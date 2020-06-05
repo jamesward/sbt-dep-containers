@@ -54,12 +54,17 @@ object SbtDepContainersPlugin extends AutoPlugin {
     lazy val dockerTag = s"$name:$branchOrTag"
   }
 
+  case class TestContainer(name: String) {
+    lazy val className = "Dep" + name.capitalize
+  }
+
   object autoImport {
     val Containers = config("Containers") extend Compile
 
     val containerBuilder = settingKey[String]("Buildpacks builder image")
     val containerDependencies = settingKey[Seq[ContainerID]]("Container dependencies")
 
+    val containersTestContainers = taskKey[Set[TestContainer]]("Containers Test Containers")
     val containersCreate = taskKey[Unit]("Create the dependency containers")
     val containersStart = taskKey[Map[String, String]]("Start the dependency containers")
     val containersStop = taskKey[Unit]("Stop the dependency containers")
@@ -130,7 +135,7 @@ object SbtDepContainersPlugin extends AutoPlugin {
       throw new Exception("Process did not succeed")
   }
 
-  def containersStartAll(containerIDs: Seq[ContainerID], moduleIDs: Seq[ModuleID], logger: sbt.util.Logger): (Map[ContainerID, URL], Map[ModuleID, _]) = {
+  def containerIDsStart(containerIDs: Seq[ContainerID], logger: sbt.util.Logger): Map[ContainerID, URL] = {
     // todo: do not start if already running
 
     val containerIDsWithURLs = containerIDs.map { containerID =>
@@ -161,7 +166,7 @@ object SbtDepContainersPlugin extends AutoPlugin {
       containerID -> new URL(s"http://localhost:$port")
     }.toMap
 
-    (containerIDsWithURLs, Map.empty)
+    containerIDsWithURLs
   }
 
   def containersStopAll(containerIDs: Seq[ContainerID], moduleIDs: Seq[ModuleID], logger: sbt.util.Logger): Unit = {
@@ -184,8 +189,8 @@ object SbtDepContainersPlugin extends AutoPlugin {
   )
 
   lazy val generateDependencyContainersTask = Def.task {
-    containerDependencies.value.map { containerID =>
-      val file = sourceManaged.value / "main" / "depcontainers" / s"${containerID.name}.scala"
+    val containerIDsFiles = containerDependencies.value.map { containerID =>
+      val file = sourceManaged.value / "main" / "depcontainers" / s"${containerID.className}.scala"
 
       val contents =
         s"""package ${containerID.packageName}
@@ -210,25 +215,123 @@ object SbtDepContainersPlugin extends AutoPlugin {
 
       file
     }
+
+    // note: I tried to use reflection to start these but testcontainers didn't like something about the classpath (missing config)
+    // todo: move these to a helper lib that can be added to the project
+    val testContainersFiles = containersTestContainers.value.map { testContainer =>
+      val file = sourceManaged.value / "main" / "depcontainers" / s"${testContainer.className}.scala"
+
+      val guts = testContainer.name match {
+        case "postgresql" =>
+          """
+            |    import scala.util.Using, java.io.{PrintWriter, File}
+            |
+            |    val container = new org.testcontainers.containers.PostgreSQLContainer()
+            |    container.start()
+            |
+            |    val port = container.getMappedPort(org.testcontainers.containers.PostgreSQLContainer.POSTGRESQL_PORT)
+            |    val databaseUrl = s"postgres://${container.getUsername}:${container.getPassword}@${container.getContainerIpAddress}:$port/${container.getDatabaseName}"
+            |    Using(new PrintWriter(file))(_.write(s"DATABASE_URL=$databaseUrl"))
+            |
+            |    Thread.currentThread().join()
+            |
+            |""".stripMargin
+
+        case name =>
+          s"""throw new Exception("Do not know how to handle $name")"""
+      }
+
+      val contents =
+        s"""package org.testcontainers.depcontainers
+           |
+           |object ${testContainer.className} {
+           |  def main(args: Array[String]): Unit = {
+           |    val file = args.head
+           |
+           |    $guts
+           |  }
+           |}
+           |
+           |""".stripMargin
+
+      IO.write(file, contents)
+
+      file
+    }
+
+    containerIDsFiles ++ testContainersFiles
   }.dependsOn(Compile / managedClasspath)
 
+  lazy val containersTestContainersStart = Def.taskDyn {
+    val dir = target.value / "depcontainers"
+
+    val startTasks = containersTestContainersTask.value.map { testContainer =>
+      val file = dir / s"${testContainer.className}.env"
+
+      if (file.exists()) file.delete()
+
+      (Compile / bgRunMain).toTask(s" org.testcontainers.depcontainers.${testContainer.className} ${file.getAbsolutePath}").map(_ => ())
+    }.toSeq
+
+    val getEnvsTask = Def.task {
+      containersTestContainersTask.value.map { testContainer =>
+        val file = dir / s"${testContainer.className}.env"
+
+        // ugly: wait for the file to exist
+        while (!file.exists()) {
+          Thread.sleep(1000)
+        }
+
+        val envs = IO.readLines(file).map { line =>
+          val Array(key, value) = line.split("=")
+          key -> value
+        }.toMap
+
+        testContainer.name -> envs
+      }.toMap
+    }
+
+    Def.sequential(startTasks, getEnvsTask)
+  }
+
   // todo: support better incremental usage
-  // todo: moduleIDs
   lazy val containersStartTask = Def.task {
-    val (containerIDsURLs, moduleIDsData) = containersStartAll(containerDependencies.value, libraryDependencies.value, streams.value.log)
+    val containerIDsURLs = containerIDsStart(containerDependencies.value, streams.value.log)
+
+    val testContainersWithEnvVars = containersTestContainersStart.value
 
     val newEnvVars = containerIDsURLs.map { case (containerID, url) =>
       containerID.envVar -> url.toString
-    }
+    } ++ testContainersWithEnvVars.foldLeft(Map.empty[String, String])(_ ++ _._2)
 
     newEnvVars
   }.dependsOn(containersCreate)
 
+  lazy val containersTestContainersTask = Def.task {
+    val s = streams.value
+
+    // note: this must be assigned otherwise the sbt macro expansion pukes
+    val testContainers = update.value.allModules.filter(_.organization == "org.testcontainers").flatMap { moduleID =>
+      moduleID.name match {
+        case "postgresql" =>
+          Vector(TestContainer("postgresql"))
+        case "testcontainers" | "jdbc" | "database-commons" =>
+          Vector.empty
+        case name =>
+          s.log.warn(s"Could not figure out how to start testcontainer $name")
+          Vector.empty
+      }
+    }.toSet
+
+    testContainers
+  }
 
   override def projectSettings: Seq[Def.Setting[_]] = Seq(
     libraryDependencies += "com.dimafeng" %% "testcontainers-scala-core" % "0.37.0",
 
     Compile / sourceGenerators += generateDependencyContainersTask.taskValue,
+
+    containersTestContainers := containersTestContainersTask.value,
 
     containersCreate := containerDependencies.value.foreach(createContainer(target.value, containerBuilder.value, streams.value.log)),
 
@@ -244,11 +347,20 @@ object SbtDepContainersPlugin extends AutoPlugin {
       new ForkRun(opts)
     },
 
+    Containers / discoveredMainClasses := {
+      val allMains = (Compile / discoveredMainClasses).value
+      allMains.filterNot(_.startsWith("org.testcontainers.depcontainers"))
+    },
+
+    Containers / run / selectMainClass := (Compile / mainClass).value orElse Defaults.askForMainClass((Containers / discoveredMainClasses).value),
+
+    Containers / run / mainClass := (Containers / run / selectMainClass).value,
+
     // todo: stop containers?
     Containers / run := {
       Defaults.runTask(
         Runtime / fullClasspath,
-        Compile / run / mainClass,
+        Containers / run / mainClass,
         Containers / run / runner,
       ).evaluated
     },
