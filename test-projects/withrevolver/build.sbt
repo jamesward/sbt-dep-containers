@@ -22,3 +22,5 @@ containerDependencies := Seq(
 reStart / envVars := containersStart.value
 
 reStart / mainClass := Some("Server")
+
+reStop := Def.sequential(reStop, containersStop).value

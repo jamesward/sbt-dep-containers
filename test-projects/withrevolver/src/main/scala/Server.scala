@@ -22,7 +22,6 @@ object Server {
     val sampleJavaResponse = Using(sampleJavaUrl.openConnection().getInputStream)(Source.fromInputStream(_).mkString).get
 
     val response =s"""
-                     |zxcv
                      |helloJava: $helloJavaResponse
                      |sampleJava: $sampleJavaResponse
                      |dbResult: $dbResult

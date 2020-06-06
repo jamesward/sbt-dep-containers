@@ -16,7 +16,7 @@ import sbt.{AutoPlugin, Def, _}
 
 import scala.collection.JavaConverters._
 import scala.language.implicitConversions
-import scala.util.Random
+import scala.util.{Random, Try}
 
 // todo: should testcontainers-scala-core be a dep of the plugin?
 
@@ -58,13 +58,17 @@ object SbtDepContainersPlugin extends AutoPlugin {
 
   case class TestContainer(name: String) {
     lazy val className: String = "Dep" + name.capitalize
+    def envFile(dir: File): File = dir / s"$className.env"
   }
+
+  case class TestContainerEnv(id: String, envs: Map[String, String])
 
   object autoImport {
     val Containers = config("Containers") extend Compile
 
     val containerBuilder = settingKey[String]("Buildpacks builder image")
     val containerDependencies = settingKey[Seq[ContainerID]]("Container dependencies")
+    val containerDepDir = settingKey[File]("Dir to store dep container stuff in")
 
     val containersTestContainers = taskKey[Set[TestContainer]]("Containers Test Containers")
     val containersCreate = taskKey[Unit]("Create the dependency containers")
@@ -86,8 +90,8 @@ object SbtDepContainersPlugin extends AutoPlugin {
     }
   }
 
-  def createContainer(target: File, containerBuilder: String, logger: sbt.util.Logger)(containerID: ContainerID): Unit = {
-    val gitDir = target / "depcontainers" / containerID.gitUrl.getHost / containerID.gitUrl.getPath / containerID.branchOrTag
+  def createContainer(depDir: File, containerBuilder: String, logger: sbt.util.Logger)(containerID: ContainerID): Unit = {
+    val gitDir = depDir / containerID.gitUrl.getHost / containerID.gitUrl.getPath / containerID.branchOrTag
 
     val ref = Git.lsRemoteRepository().setRemote(containerID.gitUrl.toString).call().asScala.find(_.getName.endsWith("/" + containerID.branchOrTag)).get
 
@@ -197,6 +201,15 @@ object SbtDepContainersPlugin extends AutoPlugin {
     }
   }
 
+  def testContainerStop(testContainer: TestContainer, depDir: File, logger: sbt.util.Logger)(implicit dockerClient: DockerClient): Unit = {
+    dockerContainerFromTestContainer(depDir, testContainer).foreach { container =>
+      if (container.isRunning) {
+        logger.info(s"Stopping container for ${testContainer.name}")
+        dockerClient.stopContainerCmd(container.getId).exec()
+      }
+    }
+  }
+
   def containerIDsStart(containerIDs: Seq[ContainerID], logger: sbt.util.Logger): Map[ContainerID, URL] = {
     implicit val dockerClient: DockerClient = createDockerClient
 
@@ -211,6 +224,12 @@ object SbtDepContainersPlugin extends AutoPlugin {
     dockerClient.listContainersCmd().exec().asScala.find(_.getImage == dockerTag)
   }
 
+  def dockerContainerFromTestContainer(dir: File, testContainer: TestContainer)(implicit dockerClient: DockerClient): Option[Container] = {
+    parseTestContainerInDocker(testContainer.envFile(dir)).toOption.flatMap { testContainerEnv =>
+      dockerClient.listContainersCmd().withIdFilter(Seq(testContainerEnv.id).asJava).exec().asScala.headOption
+    }
+  }
+
   implicit class dockerContainerIsRunning(val container: Container) extends AnyVal {
     def isRunning: Boolean = container.getState == "running"
   }
@@ -221,15 +240,11 @@ object SbtDepContainersPlugin extends AutoPlugin {
   }
 
   // todo: stop TestContainers
-  def containersStopAll(containerIDs: Seq[ContainerID], testContainers: Set[TestContainer], logger: sbt.util.Logger): Unit = {
+  def containersStopAll(containerIDs: Seq[ContainerID], testContainers: Set[TestContainer], depDir: File, logger: sbt.util.Logger): Unit = {
     implicit val dockerClient: DockerClient = createDockerClient
     containerIDs.foreach(containerIDStop(_, logger))
+    testContainers.foreach(testContainerStop(_, depDir, logger))
   }
-
-  override lazy val globalSettings = Seq(
-    containerBuilder := defaultContainerBuilder,
-    containerDependencies := Seq.empty[ContainerID],
-  )
 
   lazy val generateDependencyContainersTask = Def.task {
     val containerIDsFiles = containerDependencies.value.map { containerID =>
@@ -274,7 +289,10 @@ object SbtDepContainersPlugin extends AutoPlugin {
             |
             |    val port = container.getMappedPort(org.testcontainers.containers.PostgreSQLContainer.POSTGRESQL_PORT)
             |    val databaseUrl = s"postgres://${container.getUsername}:${container.getPassword}@${container.getContainerIpAddress}:$port/${container.getDatabaseName}"
-            |    Using(new PrintWriter(file))(_.write(s"DATABASE_URL=$databaseUrl"))
+            |    Using(new PrintWriter(file)) { writer =>
+            |      writer.write(s"${container.getContainerId}\n")
+            |      writer.write(s"DATABASE_URL=$databaseUrl")
+            |    }
             |
             |    Thread.currentThread().join()
             |
@@ -305,31 +323,47 @@ object SbtDepContainersPlugin extends AutoPlugin {
     containerIDsFiles ++ testContainersFiles
   }.dependsOn(Compile / managedClasspath)
 
+  def parseTestContainerInDocker(f: File): Try[TestContainerEnv] = {
+    Try {
+      val lines = IO.readLines(f)
+      val id = lines.head
+      val envs = lines.tail.map { line =>
+        val Array(key, value) = line.split("=")
+        key -> value
+      }.toMap
+
+      TestContainerEnv(id, envs)
+    }
+  }
+
   // todo: do not start one if one is already running
   lazy val containersTestContainersStart = Def.taskDyn {
-    val dir = target.value / "depcontainers"
+    implicit val dockerClient: DockerClient = createDockerClient
 
-    val startTasks = containersTestContainersTask.value.map { testContainer =>
-      val file = dir / s"${testContainer.className}.env"
+    val startTasks = containersTestContainersTask.value.flatMap { testContainer =>
+      val file = testContainer.envFile(containerDepDir.value)
 
-      if (file.exists()) file.delete()
+      dockerContainerFromTestContainer(containerDepDir.value, testContainer).filter(_.isRunning).fold {
+        // was not running
+        if (file.exists()) file.delete()
 
-      (Compile / bgRunMain).toTask(s" org.testcontainers.depcontainers.${testContainer.className} ${file.getAbsolutePath}").map(_ => ())
+        // start
+        Set((Compile / bgRunMain).toTask(s" org.testcontainers.depcontainers.${testContainer.className} ${file.getAbsolutePath}").map(_ => ()))
+      } { _ =>
+        Set.empty
+      }
     }.toSeq
 
     val getEnvsTask = Def.task {
       containersTestContainersTask.value.map { testContainer =>
-        val file = dir / s"${testContainer.className}.env"
+        val file = testContainer.envFile(containerDepDir.value)
 
         // ugly: wait for the file to exist
         while (!file.exists()) {
           Thread.sleep(1000)
         }
 
-        val envs = IO.readLines(file).map { line =>
-          val Array(key, value) = line.split("=")
-          key -> value
-        }.toMap
+        val envs = parseTestContainerInDocker(file).map(_.envs).getOrElse(Map.empty)
 
         testContainer.name -> envs
       }.toMap
@@ -369,18 +403,25 @@ object SbtDepContainersPlugin extends AutoPlugin {
     testContainers
   }
 
+  override lazy val globalSettings = Seq(
+    containerBuilder := defaultContainerBuilder,
+    containerDependencies := Seq.empty[ContainerID],
+  )
+
   override def projectSettings: Seq[Def.Setting[_]] = Seq(
     libraryDependencies += "com.dimafeng" %% "testcontainers-scala-core" % "0.37.0",
+
+    containerDepDir := target.value / "depcontainers",
 
     Compile / sourceGenerators += generateDependencyContainersTask.taskValue,
 
     containersTestContainers := containersTestContainersTask.value,
 
-    containersCreate := containerDependencies.value.foreach(createContainer(target.value, containerBuilder.value, streams.value.log)),
+    containersCreate := containerDependencies.value.foreach(createContainer(containerDepDir.value, containerBuilder.value, streams.value.log)),
 
     containersStart := containersStartTask.value,
 
-    containersStop := containersStopAll(containerDependencies.value, containersTestContainers.value, streams.value.log),
+    containersStop := containersStopAll(containerDependencies.value, containersTestContainers.value, containerDepDir.value, streams.value.log),
 
     Containers / run / runner := {
       val envVars = containersStart.value
