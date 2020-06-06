@@ -2,7 +2,7 @@ enablePlugins(GitVersioning)
 
 sbtPlugin := true
 
-name := "sbt-dep-containers"
+name := "sbt-depcontainers"
 
 organization := "com.jamesward"
 

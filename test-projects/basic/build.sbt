@@ -1,6 +1,6 @@
 enablePlugins(SbtDepContainersPlugin)
 
-name := "test-project"
+name := "test-project-basic"
 
 scalaVersion := "2.13.2"
 

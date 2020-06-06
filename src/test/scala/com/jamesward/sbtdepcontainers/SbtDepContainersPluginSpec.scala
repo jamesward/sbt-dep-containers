@@ -1,37 +1,36 @@
 package com.jamesward.sbtdepcontainers
 
+import java.io.File
 import java.net.URL
 import java.nio.file.Files
+import java.util.concurrent.TimeUnit
 
-import com.github.dockerjava.core.{DefaultDockerClientConfig, DockerClientBuilder}
+import com.github.dockerjava.api.DockerClient
 import com.jamesward.sbtdepcontainers.SbtDepContainersPlugin.ContainerID
 import org.scalatest.{MustMatchers, WordSpec}
 import org.slf4j.LoggerFactory
-import sbt.librarymanagement.ModuleID
 import sbt.util.{Level, Logger}
 
+import scala.concurrent.duration._
 import scala.io.Source
 import scala.util.Try
 
 class SbtDepContainersPluginSpec extends WordSpec with MustMatchers {
 
+  lazy implicit val dockerClient: DockerClient = SbtDepContainersPlugin.createDockerClient
+
   def dockerRm(containerID: ContainerID): Unit = {
-    val config = DefaultDockerClientConfig.createDefaultConfigBuilder().withDockerHost("unix:///var/run/docker.sock").build()
-    val dockerClient = DockerClientBuilder.getInstance(config).build()
     Try {
       dockerClient.removeImageCmd(containerID.dockerTag).exec()
     }
   }
 
   def dockerStartStop(containerID: ContainerID): Unit = {
-    val config = DefaultDockerClientConfig.createDefaultConfigBuilder().withDockerHost("unix:///var/run/docker.sock").build()
-    val dockerClient = DockerClientBuilder.getInstance(config).build()
-    val container = dockerClient.createContainerCmd(containerID.dockerTag).exec()
-    dockerClient.startContainerCmd(container.getId).exec()
-    dockerClient.stopContainerCmd(container.getId).exec()
+    SbtDepContainersPlugin.containerIDStart(containerID, logger)
+    SbtDepContainersPlugin.containerIDStop(containerID, logger)
   }
 
-  val logger = new Logger {
+  val logger: Logger = new Logger {
     val underlying = LoggerFactory.getLogger(getClass)
     override def trace(t: => Throwable): Unit = underlying.error("error", t)
     override def success(message: => String): Unit = underlying.info(message)
@@ -45,8 +44,15 @@ class SbtDepContainersPluginSpec extends WordSpec with MustMatchers {
     }
   }
 
+  def createTmpDir(containerID: ContainerID): File = Files.createTempDirectory(containerID.name).toFile
+
+  def createContainer(containerID: ContainerID, tmpDir: File): Unit = {
+    SbtDepContainersPlugin.createContainer(tmpDir, SbtDepContainersPlugin.defaultContainerBuilder, logger)(containerID)
+  }
+
   def createContainer(containerID: ContainerID): Unit = {
-    SbtDepContainersPlugin.createContainer(Files.createTempDirectory(containerID.name).toFile, SbtDepContainersPlugin.defaultContainerBuilder, logger)(containerID)
+    val tmpDir = createTmpDir(containerID)
+    createContainer(containerID, tmpDir)
   }
 
   "containerID" must {
@@ -69,6 +75,20 @@ class SbtDepContainersPluginSpec extends WordSpec with MustMatchers {
       dockerRm(containerID)
       createContainer(containerID)
       dockerStartStop(containerID)
+    }
+  }
+
+  "createContainer" must {
+    "not create if nothing has changed" in {
+      val containerID = ContainerID(new URL("https://github.com/jamesward/hello-java.git"), "master")
+      val tmpDir = createTmpDir(containerID)
+      dockerRm(containerID)
+      createContainer(containerID, tmpDir)
+      val startTime = System.nanoTime()
+      createContainer(containerID, tmpDir)
+      val duration = FiniteDuration(System.nanoTime() - startTime, TimeUnit.NANOSECONDS)
+      // todo: it is bad to do this based on timing
+      (duration < 2.seconds) must be (true)
     }
   }
 
@@ -105,10 +125,23 @@ class SbtDepContainersPluginSpec extends WordSpec with MustMatchers {
     }
   }
 
+  "containerIDStart" must {
+    "not start more than one" in {
+      val containerID = ContainerID(new URL("https://github.com/jamesward/hello-java.git"), "master")
+      val firstUrl = SbtDepContainersPlugin.containerIDStart(containerID, logger)
+      val secondUrl = SbtDepContainersPlugin.containerIDStart(containerID, logger)
+
+      // toString to avoid the DNS comparison
+      secondUrl.toString must equal (firstUrl.toString)
+
+      SbtDepContainersPlugin.containerIDStop(containerID, logger)
+    }
+  }
+
   "containersStopAll" must {
     "stop a containerID" in {
       val containerID = ContainerID(new URL("https://github.com/jamesward/hello-java.git"), "master")
-      SbtDepContainersPlugin.containersStopAll(Seq(containerID), Seq.empty, logger)
+      SbtDepContainersPlugin.containersStopAll(Seq(containerID), Set.empty, logger)
     }
   }
 
